@@ -147,6 +147,46 @@ def test_header_followed_by_a_body_stays_proof_without_a_clean_end(lines):
     assert severities("app/k.py", added(*lines)) == [Severity.PROOF]
 
 
+def test_many_bare_headers_scan_in_linear_time():
+    import time
+    line = " ".join([PEM_HEADER] * 40)
+    started = time.monotonic()
+    result = scan([change("app/k.py", added=tuple((i, line) for i in range(1, 1001)))])
+    assert time.monotonic() - started < 2.0  # quadratic took ~19 s on 1.2 MiB
+    assert {f.severity for f in result.findings} == {Severity.SUSPICION}
+
+
+def test_header_field_lines_scan_in_linear_time():
+    import time
+    lines = tuple((i, f"Proc-Type: {PEM_HEADER}") for i in range(1, 20001))
+    started = time.monotonic()
+    result = scan([change("app/k.py", added=lines)])
+    assert time.monotonic() - started < 2.0
+    assert {f.severity for f in result.findings} == {Severity.SUSPICION}
+
+
+def test_many_distinct_labels_on_one_line_scan_in_linear_time():
+    import time
+    labels = ["".join(chr(65 + (n // 26 ** k) % 26) for k in range(4)) + " PRIVATE " + "KEY"
+              for n in range(20000)]
+    line = "\\n".join(f"-----BEGIN {label}-----" for label in labels)
+    started = time.monotonic()
+    result = scan([change("app/k.py", added=((1, line),))])
+    assert time.monotonic() - started < 2.0
+    assert {f.severity for f in result.findings} == {Severity.SUSPICION}
+
+
+def test_a_decoy_sharing_dashes_with_a_real_header_cannot_hide_the_key():
+    decoy = PEM_HEADER.replace("RSA", "EC")[:-5]  # "-----BEGIN EC PRIVATE KEY" with its dashes shared
+    line = f'k = "{decoy}{PEM_HEADER}\\n{PEM_BODY}\\n{PEM_END}"'
+    assert Severity.PROOF in severities("app/k.py", added(line))
+
+
+def test_a_same_label_decoy_sharing_dashes_cannot_hide_the_key():
+    line = f'k = "{PEM_HEADER[:-5]}{PEM_HEADER}\\n{PEM_BODY}\\n{PEM_END}"'
+    assert severities("app/k.py", added(line)) == [Severity.PROOF]
+
+
 def test_decoy_header_cannot_hide_a_real_key():
     line = f'K = "{PEM_HEADER} {PEM_HEADER}\\n{PEM_BODY}\\n{PEM_END}"'
     assert Severity.PROOF in severities("app/k.py", added(line))

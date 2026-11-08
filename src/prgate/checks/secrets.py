@@ -34,12 +34,14 @@ def _fmt(kind: str, regex: str, proof: bool = True) -> _Format:
 
 _B = r"(?<![A-Za-z0-9_-])"  # token boundaries, so an over-long run fails the length rule
 _E = r"(?![A-Za-z0-9_-])"
+_KEY_HEADER_RE = r"-----BEGIN (?P<label>(?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?)-----"
+_KEY_HEADER_ANYWHERE = re.compile(f"(?=({_KEY_HEADER_RE}))")  # overlapping matches too
 _FORMATS = (
     _fmt(_AWS, _B + r"AKIA(?P<tok>[0-9A-Z]{16})" + _E),
     _fmt("GitHub personal access token", _B + r"ghp_(?P<tok>[A-Za-z0-9]{36})" + _E, proof=False),
     _fmt("Stripe live secret key", _B + r"sk_live_(?P<tok>[A-Za-z0-9]{24,99})" + _E),
     _fmt("Slack bot token", _B + r"xoxb-[0-9]{10,13}-[0-9]{10,13}-(?P<tok>[A-Za-z0-9]{24})" + _E),
-    _fmt(_KEY, r"-----BEGIN (?P<label>(?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?)-----"),
+    _fmt(_KEY, _KEY_HEADER_RE),
     _fmt("Google API key", _B + r"AIza(?P<tok>[0-9A-Za-z_-]{35})" + _E),
     _fmt("Anthropic API key", _B + r"sk-ant-(?:[a-z0-9]+-)?(?P<tok>[A-Za-z0-9_-]{32,})" + _E),
 )
@@ -58,13 +60,22 @@ def _in_fixture_dir(path: str) -> bool:
 
 def _matches(line: str) -> Iterable[tuple[_Format, str]]:
     for fmt in _FORMATS:
-        for m in fmt.pattern.finditer(line):
-            if m.group(0) in KNOWN_EXAMPLES or (fmt.kind == _AWS and m.group(0).endswith("EXAMPLE")):
+        # Key headers can share dashes with a decoy before them, so they are found overlapping,
+        # and each label is reported once per line so overlaps do not repeat a finding.
+        pattern = _KEY_HEADER_ANYWHERE if fmt.kind == _KEY else fmt.pattern
+        seen_labels: set[str] = set()
+        for m in pattern.finditer(line):
+            value = m.group(1) if fmt.kind == _KEY else m.group(0)
+            if fmt.kind == _KEY:
+                if value in seen_labels:
+                    continue
+                seen_labels.add(value)
+            if value in KNOWN_EXAMPLES or (fmt.kind == _AWS and value.endswith("EXAMPLE")):
                 continue
             token = m.groupdict().get("tok")
             if token is not None and _trivial(token):
                 continue
-            yield fmt, m.group(0)
+            yield fmt, value
 
 
 def _lines(change: FileChange, read_blob: Callable[[str], bytes] | None) -> Iterable[tuple[int, str]]:
@@ -95,32 +106,44 @@ def _segments(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
     return out
 
 
-def _body_follows(texts: Iterable[str]) -> bool:
-    """Whether the first line of real content after a header looks like a base64 key body."""
-    for text in texts:
-        if not text or _PEM_HEADER_FIELD.match(text):
-            continue
-        return bool(_BODY.fullmatch(text))
-    return False
-
-
-def _has_key_body(segments: list[tuple[int, str]], number: int, label: str) -> bool:
-    """Whether any occurrence of the header on line `number` is followed by a base64 key body.
+class _KeyBodies:
+    """Answers "is this header followed by a key body?" for one file in linear time overall.
 
     A header alone, or one followed by something other than base64 (a name in a key parser, a
     sentence in documentation), is not a key. A header followed by a body is, END line or not.
     Every occurrence is checked, so a decoy header earlier on the line cannot hide a real key.
     """
-    header = f"-----BEGIN {label}-----"
-    for i, (n, text) in enumerate(segments):
-        if n != number:
-            continue
-        pieces = text.split(header)
-        for k in range(1, len(pieces)):
-            after = header.join(pieces[k:]).strip(_WRAPPING)
-            if _body_follows((after, *(t for _, t in segments[i + 1:]))):
-                return True
-    return False
+
+    def __init__(self, segments: list[tuple[int, str]]):
+        # One reverse pass: below[i] is whether the first real content after segment i is a body.
+        below = [False] * len(segments)
+        follows = False
+        for i in range(len(segments) - 1, -1, -1):
+            below[i] = follows
+            text = segments[i][1]
+            if text and not _PEM_HEADER_FIELD.match(text):
+                follows = bool(_BODY.fullmatch(text))
+        # One forward pass: every header occurrence of every label, each judged once. A decoy can
+        # share its dashes with the real header ("...KEY-----BEGIN RSA..."), so overlapping
+        # occurrences are judged too, whatever their label.
+        self._answers: dict[tuple[int, str], bool] = {}
+        for i, (number, text) in enumerate(segments):
+            end = len(text.rstrip(_WRAPPING))
+            for m in _KEY_HEADER_ANYWHERE.finditer(text):
+                key = (number, m.group("label"))
+                if self._answers.get(key):
+                    continue
+                start = m.end(1)
+                while start < end and text[start] in _WRAPPING:
+                    start += 1
+                if start >= end or _PEM_HEADER_FIELD.match(text, start):
+                    found = below[i]  # the rest of the line is empty: look below it
+                else:
+                    found = bool(_BODY.fullmatch(text, start, end))
+                self._answers[key] = found
+
+    def has_body(self, number: int, label: str) -> bool:
+        return self._answers.get((number, label), False)
 
 
 def scan(changes: Iterable[FileChange], read_blob: Callable[[str], bytes] | None = None) -> CheckResult:
@@ -130,14 +153,14 @@ def scan(changes: Iterable[FileChange], read_blob: Callable[[str], bytes] | None
             continue
         fixture = _in_fixture_dir(change.path)
         lines = list(_lines(change, read_blob))
-        segments: list[tuple[int, str]] | None = None
+        bodies: _KeyBodies | None = None
         for number, line in lines:
             for fmt, value in _matches(line):
                 proof = fmt.proof
                 if proof and fmt.kind == _KEY:
-                    segments = _segments(lines) if segments is None else segments
+                    bodies = _KeyBodies(_segments(lines)) if bodies is None else bodies
                     label = value[len("-----BEGIN "):-len("-----")]
-                    proof = _has_key_body(segments, number, label)
+                    proof = bodies.has_body(number, label)
                 if proof and not fixture:
                     findings.append(Finding(CHECK, Severity.PROOF, f"{fmt.kind} in an added line",
                                             change.path, number))
