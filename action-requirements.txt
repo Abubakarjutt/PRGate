@@ -1,2 +1,2 @@
 # release/hash_release.py replaces this placeholder hash with the published wheel's sha256.
-prgate==0.0.1 --hash=sha256:6323477e7df106aa4cb655f2d22f21c4dcb9040a6881b402b6b8ac8f3f017c2d
+prgate==0.1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000000

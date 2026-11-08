@@ -27,7 +27,7 @@ def test_requests_go_to_the_api_host_with_a_generic_agent():
     assert API_ROOT == "https://api.github.com"
     assert headers["authorization"] == f"Bearer {TOKEN}"
     assert headers["user-agent"] == f"prgate/{prgate.__version__}"
-    assert prgate.__version__ == "0.0.1"
+    assert prgate.__version__ == "0.1.0"
 
 
 def test_create_check_posts_a_completed_pr_gate_run():

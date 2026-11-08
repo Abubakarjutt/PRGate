@@ -315,7 +315,7 @@ def test_action_requirements_pin_this_version_by_hash():
     lines = [x for x in REQUIREMENTS.read_text().splitlines() if x.strip() and not x.lstrip().startswith("#")]
     assert len(lines) == 1
     assert re.fullmatch(rf"prgate=={re.escape(prgate.__version__)} --hash=sha256:[0-9a-f]{{64}}", lines[0])
-    assert prgate.__version__ == "0.0.1"
+    assert prgate.__version__ == "0.1.0"
 
 
 def test_action_installs_only_from_the_hashed_requirements_file(action):
