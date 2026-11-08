@@ -1,0 +1,67 @@
+name: prgate
+description: Experimental, report-only PR gate. Never runs code from the pull request.
+author: Abubakar Jutt
+branding:
+  icon: shield
+  color: gray-dark
+
+inputs:
+  mode:
+    description: "stage1, verdict or command"
+    required: true
+  index-url:
+    description: "Package index prgate is installed from"
+    required: false
+    default: https://pypi.org/simple
+  token:
+    description: "Gate App token (verdict and command modes). Only the step that runs prgate sees it."
+    required: false
+    default: ""
+  app-slug:
+    description: "Gate App slug, used to find the App's own pr-gate check"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.12"
+
+    - name: Install prgate
+      shell: bash
+      env:
+        PRGATE_MODE: ${{ inputs.mode }}
+        PRGATE_INDEX_URL: ${{ inputs.index-url }}
+      run: |
+        set -euo pipefail
+        case "$PRGATE_MODE" in
+          stage1|verdict|command) ;;
+          *) echo "prgate: unknown mode" >&2; exit 2 ;;
+        esac
+        case "$PRGATE_INDEX_URL" in
+          https://*) ;;
+          *) echo "prgate: index-url must be an https URL" >&2; exit 2 ;;
+        esac
+        venv="$RUNNER_TEMP/prgate-venv"
+        python -I -m venv "$venv"
+        # Exactly the hashed wheel in action-requirements.txt: no build code runs, nothing else installs.
+        env -u PRGATE_TOKEN "$venv/bin/python" -I -m pip install --quiet --disable-pip-version-check \
+          --no-input --require-hashes --no-deps --only-binary=:all: --index-url "$PRGATE_INDEX_URL" \
+          -r "$GITHUB_ACTION_PATH/action-requirements.txt"
+
+    - name: Run prgate
+      shell: bash
+      env:
+        PRGATE_MODE: ${{ inputs.mode }}
+        PRGATE_TOKEN: ${{ inputs.token }}
+        PRGATE_APP_SLUG: ${{ inputs.app-slug }}
+      run: |
+        set -euo pipefail
+        case "$PRGATE_MODE" in
+          stage1|verdict|command) ;;
+          *) echo "prgate: unknown mode" >&2; exit 2 ;;
+        esac
+        "$RUNNER_TEMP/prgate-venv/bin/prgate" "$PRGATE_MODE"

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prgate"
+dynamic = ["version"]
+description = "An experimental, report-only GitHub PR gate that never runs code from the pull request."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Abubakar Jutt" }]
+requires-python = ">=3.12"
+dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Source = "https://github.com/Abubakarjutt/PRGate"
+
+[project.scripts]
+prgate = "prgate.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "prgate.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["prgate*"]
+
+[tool.setuptools.package-data]
+prgate = ["templates/*.yml"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+markers = [
+    "docker: tests that need a running Docker daemon and the python:3.12-slim image",
+]

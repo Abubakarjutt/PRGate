@@ -1,0 +1,116 @@
+# Release prgate on a version tag. The public repo carries this file as .github/workflows/release.yml.
+#
+# build:   rebuild the wheel from the tagged commit with the pinned tools (release/build-requirements.txt)
+#          and SOURCE_DATE_EPOCH from that commit, and stop unless its sha256 is the one pinned in
+#          action-requirements.txt, i.e. the exact wheel the action installs.
+# publish: upload exactly that wheel by trusted publishing (OIDC). No password or token exists here.
+#          v0.0.* tags are rehearsals and go to TestPyPI; every other tag goes to PyPI.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      sha256: ${{ steps.wheel.outputs.sha256 }}
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: SOURCE_DATE_EPOCH is the last commit that touched a wheel input.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Refuse the placeholder hash
+        run: |
+          set -euo pipefail
+          if grep -Eq 'sha256:0{64}' action-requirements.txt; then
+            echo "action-requirements.txt still holds the placeholder hash; run release/hash_release.py" >&2
+            exit 1
+          fi
+
+      - name: Build with the pinned tools and require the pinned hash
+        env:
+          TAG: ${{ github.ref_name }}
+        # hash_release.py installs release/build-requirements.txt by hash into a fresh venv, runs
+        # `python -m build --wheel` on the committed inputs with SOURCE_DATE_EPOCH set, and exits 1
+        # unless the wheel's sha256 equals the hash in action-requirements.txt.
+        run: |
+          set -euo pipefail
+          python -I release/hash_release.py --check "${TAG#v}" --outdir dist
+
+      - name: Record the wheel's hash
+        id: wheel
+        run: |
+          set -euo pipefail
+          test "$(find dist -type f | wc -l)" -eq 1
+          echo "sha256=$(sha256sum dist/*.whl | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Run the packaging tests
+        run: |
+          set -euo pipefail
+          python -I -m venv "$RUNNER_TEMP/test-venv"
+          "$RUNNER_TEMP/test-venv/bin/python" -I -m pip install --quiet --disable-pip-version-check \
+            --no-input --require-hashes --no-deps --only-binary=:all: \
+            -r release/build-requirements.txt -r release/test-requirements.txt
+          "$RUNNER_TEMP/test-venv/bin/python" -m pytest tests/test_packaging.py -v
+
+      - name: Upload the wheel
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download the wheel
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+
+      - name: Require the same wheel the build job checked
+        env:
+          EXPECTED: ${{ needs.build.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          test "$(find dist -type f | wc -l)" -eq 1
+          echo "$EXPECTED  $(ls dist/*.whl)" | sha256sum --check --strict
+
+      - name: Publish to TestPyPI (v0.0.* rehearsal tags)
+        if: startsWith(github.ref_name, 'v0.0.')
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+
+      - name: Publish to PyPI
+        if: ${{ !startsWith(github.ref_name, 'v0.0.') }}
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist/

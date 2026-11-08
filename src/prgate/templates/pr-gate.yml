@@ -1,0 +1,108 @@
+# prgate: an experimental, report-only PR gate. `prgate init` writes this file; keep it
+# byte-for-byte as written, because `prgate doctor` and `init` compare it exactly.
+#
+# The check `pr-gate` always concludes `neutral`, so it never blocks a merge.
+# No job installs, imports or runs code from the pull request:
+#   - stage1 checks out the BASE commit, fetches the PR head as git objects only, and
+#     parses them with prgate (installed from PyPI at a pinned version). It has no secrets.
+#   - verdict holds the gate App token. It never checks out anything and reads the stage 1
+#     results only as data.
+# Event values reach scripts through `env:` only, never by `${{ }}` inside `run:`.
+name: pr-gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  stage1:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    concurrency:
+      group: pr-gate-stage1-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Check out the base commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the PR head as data
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "prgate: the PR head is not a full commit SHA" >&2
+            exit 1
+          fi
+          # The token goes to git through its environment, never argv or .git/config.
+          auth=$(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" \
+            git fetch --no-tags --no-recurse-submodules origin "$HEAD_SHA"
+          git cat-file -e "$HEAD_SHA^{commit}"
+
+      - name: Run prgate stage 1
+        uses: __PRGATE_ACTION_REF__
+        with:
+          mode: stage1
+
+      - name: Upload stage 1 results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: prgate-stage1
+          path: prgate-stage1.json
+          if-no-files-found: ignore
+          retention-days: 1
+
+  verdict:
+    needs: stage1
+    if: >-
+      always() && (github.event_name == 'pull_request_target' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/gate override ')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: prgate-verdict
+    permissions: {}
+    concurrency:
+      group: pr-gate-verdict-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Mint the gate App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.PRGATE_APP_ID }}
+          private-key: ${{ secrets.PRGATE_APP_KEY }}
+          permission-checks: write
+          permission-contents: read
+          permission-pull-requests: read
+
+      - name: Download stage 1 results
+        if: github.event_name == 'pull_request_target'
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: prgate-stage1
+
+      - name: Post the pr-gate report
+        uses: __PRGATE_ACTION_REF__
+        with:
+          mode: ${{ github.event_name == 'issue_comment' && 'command' || 'verdict' }}
+          token: ${{ steps.app.outputs.token }}
+          app-slug: ${{ steps.app.outputs.app-slug }}
